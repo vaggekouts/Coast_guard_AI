@@ -1,6 +1,5 @@
 import streamlit as st
 import os
-import tempfile
 from dotenv import load_dotenv
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -17,60 +16,67 @@ load_dotenv()
 st.set_page_config(page_title="Ψηφιακός Βοηθός Λ.Σ.", page_icon="⚓")
 st.title("⚓ Ψηφιακός Βοηθός Λ.Σ. - ΕΛ.ΑΚΤ.")
 
+# Φορτώνουμε το τοπικό μοντέλο ΜΟΝΟ μία φορά (Caching)
 @st.cache_resource
 def get_embeddings():
     return HuggingFaceEmbeddings(model_name="sentence-transformers/paraphrase-multilingual-mpnet-base-v2")
 
-# --- 1. ΕΚΜΑΘΗΣΗ ΝΟΜΟΘΕΣΙΑΣ ΜΕ DRAG & DROP (SIDEBAR) ---
+# Συνάρτηση που διαβάζει ΟΛΑ τα PDF από τον φάκελο data και χτίζει τη βάση
+def build_vector_db():
+    if not os.path.exists("data"):
+        st.error("Δεν βρέθηκε ο φάκελος 'data'.")
+        return False
+        
+    pdf_files = [f for f in os.listdir("data") if f.endswith('.pdf')]
+    if not pdf_files:
+        st.error("Δεν βρέθηκαν αρχεία PDF στον φάκελο 'data'.")
+        return False
+
+    all_chunks = []
+    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
+
+    # Διάβασμα ΚΑΘΕ αρχείου PDF που υπάρχει στον φάκελο data
+    for pdf_file in pdf_files:
+        pdf_path = os.path.join("data", pdf_file)
+        loader = PyPDFLoader(pdf_path)
+        docs = loader.load()
+        chunks = splitter.split_documents(docs)
+        all_chunks.extend(chunks)
+
+    embeddings = get_embeddings()
+    Chroma.from_documents(all_chunks, embeddings, persist_directory="./chroma_db")
+    return True
+
+
+# --- 1. ΠΛΑΪΝΟ ΜΕΝΟΥ (SIDEBAR) - ΠΛΗΡΟΦΟΡΙΕΣ & ΔΙΑΧΕΙΡΙΣΗ ---
 with st.sidebar:
-    st.header("⚙️ Διαχείριση Γνώσης")
+    st.header("📚 Βάση Νομοθεσίας")
     
-    # ΝΕΟ: Εργαλείο μεταφόρτωσης (υποστηρίζει πολλαπλά αρχεία)
-    uploaded_files = st.file_uploader(
-        "Ανεβάστε ένα ή περισσότερα PDF με νομοθεσία:", 
-        type="pdf", 
-        accept_multiple_files=True
-    )
-    
-    if st.button("📚 Ανάλυση Εγγράφων"):
-        if not uploaded_files:
-            st.warning("Παρακαλώ ανεβάστε τουλάχιστον ένα αρχείο PDF πρώτα.")
+    # Εμφάνιση όλων των διαθέσιμων PDF στους πολίτες/αξιωματικούς
+    if os.path.exists("data"):
+        available_pdfs = [f for f in os.listdir("data") if f.endswith('.pdf')]
+        if available_pdfs:
+            st.markdown("Το σύστημα απαντά βάσει των εξής εγγράφων:")
+            for pdf in available_pdfs:
+                st.caption(f"📄 {pdf}")
         else:
-            with st.spinner("Ανάγνωση και ανάλυση των εγγράφων..."):
-                all_chunks = []
-                
-                # Επεξεργασία κάθε ανεβασμένου αρχείου
-                for uploaded_file in uploaded_files:
-                    # Δημιουργία προσωρινού φακέλου και αρχείου για να το διαβάσει το LangChain
-                    temp_dir = tempfile.mkdtemp()
-                    temp_path = os.path.join(temp_dir, uploaded_file.name)
-                    
-                    with open(temp_path, "wb") as f:
-                        f.write(uploaded_file.getvalue())
-                    
-                    # Φόρτωση του PDF
-                    loader = PyPDFLoader(temp_path)
-                    docs = loader.load()
-                    
-                    # Ενημέρωση των metadata ώστε η πηγή να έχει το σωστό όνομα του αρχείου
-                    for doc in docs:
-                        doc.metadata['source'] = uploaded_file.name
-                    
-                    # Τεμαχισμός (Splitting)
-                    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
-                    chunks = splitter.split_documents(docs)
-                    
-                    # Προσθήκη των κομματιών στη συνολική λίστα
-                    all_chunks.extend(chunks)
-                
-                embeddings = get_embeddings()
-                
-                # Δημιουργία της διανυσματικής βάσης από ΟΛΑ τα κομμάτια ΟΛΩΝ των PDF
-                db = Chroma.from_documents(all_chunks, embeddings, persist_directory="./chroma_db")
-                st.success(f"Επιτυχής ανάλυση {len(uploaded_files)} εγγράφου/ων!")
+            st.warning("Ο φάκελος 'data' είναι άδειος.")
+            
+    st.divider()
+    st.header("⚙️ Διαχείριση")
+    if st.button("🔄 Ανανέωση Βάσης PDF"):
+        with st.spinner("Γίνεται ανάλυση όλων των εγγράφων του φακέλου data..."):
+            if build_vector_db():
+                st.success(f"Αναλύθηκαν επιτυχώς {len(available_pdfs)} έγγραφα!")
 
 
-# --- 2. ΣΥΣΤΗΜΑ ΕΡΩΤΑΠΟΚΡΙΣΕΩΝ ΜΕ ΜΝΗΜΗ ΚΑΙ ΠΗΓΕΣ (CHAT) ---
+# --- 2. ΑΥΤΟΜΑΤΗ ΕΚΚΙΝΗΣΗ ΒΑΣΗΣ (ΑΝ Ο SERVER ΕΚΑΝΕ REBOOT) ---
+if not os.path.exists("./chroma_db"):
+    with st.spinner("🔄 Αρχικοποίηση βάσης νομοθεσίας Λ.Σ.-ΕΛ.ΑΚΤ. Παρακαλώ περιμένετε λίγο..."):
+        build_vector_db()
+
+
+# --- 3. ΣΥΣΤΗΜΑ ΕΡΩΤΑΠΟΚΡΙΣΕΩΝ ΜΕ ΜΝΗΜΗ ΚΑΙ ΠΗΓΕΣ (CHAT) ---
 st.subheader("💬 Ρωτήστε τον Ψηφιακό Βοηθό")
 
 if "messages" not in st.session_state:
@@ -80,7 +86,7 @@ for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-if user_question := st.chat_input("Γράψτε την ερώτησή σας σχετικά με τη νομοθεσία..."):
+if user_question := st.chat_input("Ρωτήστε για νομοθεσία, σωστικά μέσα σκαφών, ναυαγοσώστες κ.ά..."):
     
     with st.chat_message("user"):
         st.markdown(user_question)
@@ -88,7 +94,7 @@ if user_question := st.chat_input("Γράψτε την ερώτησή σας σ�
 
     if not os.path.exists("./chroma_db"):
         with st.chat_message("assistant"):
-            st.warning("Παρακαλώ ανεβάστε και αναλύστε τα PDF από το μενού στα αριστερά πρώτα.")
+            st.warning("Η βάση δεδομένων δεν είναι έτοιμη. Πατήστε 'Ανανέωση Βάσης PDF' αριστερά.")
     else:
         with st.chat_message("assistant"):
             with st.spinner("Αναζήτηση στη νομοθεσία..."):
@@ -107,14 +113,14 @@ if user_question := st.chat_input("Γράψτε την ερώτησή σας σ�
                 chat_history_text = "\n".join([f"{msg['role']}: {msg['content']}" for msg in st.session_state.messages[-5:]])
                 
                 prompt = ChatPromptTemplate.from_template("""
-                Είσαι ένας ψηφιακός βοηθός του Ελληνικού Λιμενικού Σώματος.
-                Χρησιμοποίησε ΜΟΝΟ το παρακάτω πλαίσιο (context) από τη νομοθεσία για να απαντήσεις.
+                Είσαι ένας επίσημος ψηφιακός βοηθός του Ελληνικού Λιμενικού Σώματος (Λ.Σ.-ΕΛ.ΑΚΤ.) και εξυπηρετείς τόσο στελέχη του Σώματος όσο και πολίτες.
+                Χρησιμοποίησε ΜΟΝΟ το παρακάτω πλαίσιο (context) από τη νομοθεσία για να απαντήσεις με σαφήνεια και ευγένεια.
                 
-                Το πλαίσιο περιλαμβάνει την Πηγή (όνομα αρχείου) και τη Σελίδα.
+                Το πλαίσιο περιλαμβάνει την Πηγή (όνομα αρχείου) και τη Σελίδα από την οποία αντλήθηκε το κείμενο.
                 ΣΗΜΑΝΤΙΚΟΣ ΚΑΝΟΝΑΣ: Στο τέλος της απάντησής σου, να αναφέρεις ΠΑΝΤΑ τις πηγές που χρησιμοποίησες, π.χ. "Πηγές: [Όνομα αρχείου], Σελίδα [X]". 
                 
                 Λάβε υπόψη το Ιστορικό Συζήτησης για να καταλάβεις σε τι αναφέρεται ο χρήστης αν η ερώτηση είναι σύντομη.
-                Αν δεν ξέρεις την απάντηση βάσει του κειμένου, πες 'Δεν βρέθηκε σχετική πληροφορία'.
+                Αν δεν ξέρεις την απάντηση βάσει του κειμένου, πες 'Δεν βρέθηκε σχετική πληροφορία στη διαθέσιμη νομοθεσία'.
                 
                 Ιστορικό Συζήτησης:
                 {history}
@@ -128,7 +134,8 @@ if user_question := st.chat_input("Γράψτε την ερώτησή σας σ�
                 def format_docs(docs):
                     formatted_texts = []
                     for doc in docs:
-                        source_name = doc.metadata.get('source', 'Άγνωστο έγγραφο')
+                        source = doc.metadata.get('source', 'Άγνωστο έγγραφο')
+                        source_name = os.path.basename(source) 
                         page = doc.metadata.get('page', 0) + 1  
                         formatted_texts.append(f"[Πηγή: {source_name}, Σελίδα: {page}]\n{doc.page_content}")
                     return "\n\n---\n\n".join(formatted_texts)
@@ -149,9 +156,11 @@ if user_question := st.chat_input("Γράψτε την ερώτησή σας σ�
                 
                 st.session_state.messages.append({"role": "assistant", "content": response})
 
+            # Παραθυράκι επαλήθευσης των αποσπασμάτων του PDF
+            retrieved_docs = retriever.invoke(user_question)
             with st.expander("🔍 Δες ποια ακριβώς αποσπάσματα βρήκε στα PDF"):
                 for i, doc in enumerate(retrieved_docs):
-                    source_file = doc.metadata.get('source', 'Άγνωστο')
+                    source_file = os.path.basename(doc.metadata.get('source', 'Άγνωστο'))
                     page_num = doc.metadata.get('page', 0) + 1
                     st.markdown(f"**Απόσπασμα {i+1}** (Από: `{source_file}`, Σελίδα: `{page_num}`)")
                     st.write(doc.page_content)
